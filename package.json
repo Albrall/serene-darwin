@@ -1,0 +1,21 @@
+{
+  "name": "vault-copilot",
+  "version": "1.0.0",
+  "description": "A personal Obsidian plugin for medical-lecture-notes workflow",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^16.11.29",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.17.3",
+    "obsidian": "latest",
+    "tslib": "2.4.0",
+    "typescript": "4.9.5"
+  }
+}
