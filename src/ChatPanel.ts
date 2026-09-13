@@ -9,7 +9,6 @@ import { MODEL_OPTIONS } from './settings';
 export const CHAT_VIEW_TYPE = "vault-copilot-chat-view";
 
 // ── Note picker modal ─────────────────────────────────────────────────────────
-// Lets the user choose any note from the vault as the chat context.
 
 class NoteSuggestModal extends SuggestModal<TFile> {
     private onChoose: (file: TFile | null) => void;
@@ -44,15 +43,13 @@ export class ChatPanel extends ItemView {
     messages: ChatMessage[] = [];
     attachments: AttachmentData[] = [];
 
-    /** The model currently in use for this session. Starts from settings default. */
     private activeModel: string;
     /**
      * The note currently pinned as context.
-     * null  = no context pinned (use active note automatically).
+     * null  = auto (active note).
      * TFile = user has pinned a specific note.
      */
     private pinnedContextFile: TFile | null = null;
-
     private llmProvider: LLMProvider;
 
     // DOM refs
@@ -116,7 +113,7 @@ export class ChatPanel extends ItemView {
         // ── Toolbar row ───────────────────────────────────────────────────────
         const toolbar = bottom.createDiv({ cls: 'vc-toolbar' });
 
-        // Context chip — shows pinned note or active note; click to pick
+        // Context chip
         const contextChip = toolbar.createEl('button', { cls: 'vc-context-chip' });
         const contextIcon = contextChip.createSpan({ cls: 'vc-chip-icon' });
         setIcon(contextIcon, 'file-text');
@@ -124,10 +121,8 @@ export class ChatPanel extends ItemView {
         this.updateContextChipLabel();
         const contextChevron = contextChip.createSpan({ cls: 'vc-chip-chevron' });
         setIcon(contextChevron, 'chevron-down');
-
         contextChip.addEventListener('click', () => this.openContextPicker());
 
-        // Update chip when active note changes (only when nothing is pinned)
         this.registerEvent(
             this.app.workspace.on('active-leaf-change', () => {
                 if (!this.pinnedContextFile) this.updateContextChipLabel();
@@ -137,7 +132,7 @@ export class ChatPanel extends ItemView {
         // Toolbar right
         const toolbarRight = toolbar.createDiv({ cls: 'vc-toolbar-right' });
 
-        // Model dropdown button
+        // Model dropdown
         const modelBtn = toolbarRight.createEl('button', { cls: 'vc-model-btn' });
         this.modelBtnLabel = modelBtn.createSpan({ cls: 'vc-model-label' });
         this.modelBtnLabel.textContent = this.getModelLabel(this.activeModel);
@@ -191,7 +186,6 @@ export class ChatPanel extends ItemView {
     // ── Context picker ────────────────────────────────────────────────────────
 
     private openContextPicker() {
-        // Show a small menu: active note / pick note / no context
         const menu = document.createElement('div');
         menu.className = 'vc-context-menu';
 
@@ -202,15 +196,12 @@ export class ChatPanel extends ItemView {
             const ic = item.createSpan();
             setIcon(ic, icon);
             item.createSpan({ text: label });
-            item.addEventListener('click', () => {
-                menu.remove();
-                onClick();
-            });
+            item.addEventListener('click', () => { menu.remove(); onClick(); });
         };
 
         if (activeFile) {
             addItem(`Use active note: ${activeFile.basename}`, 'file-text', () => {
-                this.pinnedContextFile = null; // auto = active note
+                this.pinnedContextFile = null;
                 this.updateContextChipLabel();
             });
         }
@@ -226,18 +217,15 @@ export class ChatPanel extends ItemView {
 
         addItem('No context', 'x-circle', () => {
             this.pinnedContextFile = null;
-            // Override to show explicitly "No context" even if active note exists
             this.contextChipLabel.textContent = 'No context';
         });
 
-        // Position below the chip — use visualViewport on iOS for accurate coords
         document.body.appendChild(menu);
         const chipRect = (this.containerEl.querySelector('.vc-context-chip') as HTMLElement)?.getBoundingClientRect();
         if (chipRect) {
             const vpTop = (window.visualViewport?.offsetTop ?? 0);
             menu.style.top  = (chipRect.bottom + 4 - vpTop) + 'px';
             menu.style.left = chipRect.left + 'px';
-            // Clamp so the menu doesn't overflow the right edge of the screen
             const menuWidth = 220;
             const maxLeft   = (window.visualViewport?.width ?? window.innerWidth) - menuWidth - 8;
             if (chipRect.left > maxLeft) menu.style.left = maxLeft + 'px';
@@ -286,9 +274,7 @@ export class ChatPanel extends ItemView {
         document.body.appendChild(menu);
         const anchorRect = anchor.getBoundingClientRect();
         const vpHeight   = window.visualViewport?.height ?? window.innerHeight;
-        // Open upward: bottom edge of menu anchors to top of button
         menu.style.bottom = (vpHeight - anchorRect.top + 4) + 'px';
-        // Clamp left so menu doesn't overflow screen edges
         const menuWidth = 220;
         const vw        = window.visualViewport?.width ?? window.innerWidth;
         const clampedLeft = Math.min(anchorRect.left, vw - menuWidth - 8);
@@ -298,12 +284,8 @@ export class ChatPanel extends ItemView {
     }
 
     /**
-     * Attaches a dismiss listener to a floating menu that closes it when the
-     * user taps or clicks anywhere outside it.
-     *
-     * Listens on BOTH 'mousedown' (desktop) and 'touchstart' (iOS/iPadOS) —
-     * iOS Safari fires touch events, not mouse events, for taps outside modals.
-     * Without touchstart the menu would never close on mobile.
+     * Closes a floating menu when the user taps/clicks outside it.
+     * Listens on both 'mousedown' (desktop) and 'touchstart' (iOS/iPadOS).
      */
     private attachDismissListener(menu: HTMLElement) {
         const close = (e: Event) => {
@@ -319,7 +301,7 @@ export class ChatPanel extends ItemView {
         }, 0);
     }
 
-    // ── Rendering helpers ─────────────────────────────────────────────────────
+    // ── Rendering ─────────────────────────────────────────────────────────────
 
     private autoGrow() {
         this.textArea.style.height = 'auto';
@@ -350,63 +332,99 @@ export class ChatPanel extends ItemView {
             const empty = this.messagesDiv.createDiv({ cls: 'vc-empty-state' });
             const emptyIcon = empty.createDiv({ cls: 'vc-empty-icon' });
             setIcon(emptyIcon, 'message-circle');
+            empty.createDiv({ cls: 'vc-empty-title', text: 'Vault Copilot' });
             empty.createDiv({ cls: 'vc-empty-text', text: 'Ask anything about your vault.' });
             return;
         }
 
         for (const msg of this.messages) {
-            const bubble = this.messagesDiv.createDiv({
-                cls: `vc-bubble vc-bubble-${msg.role}`
-            });
-
-            if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
-                const attBadge = bubble.createDiv({ cls: 'vc-bubble-attachments' });
-                for (const a of msg.attachments) {
-                    const p = attBadge.createDiv({ cls: 'vc-bubble-att-pill' });
-                    const ic = p.createSpan();
-                    setIcon(ic, 'file');
-                    p.createSpan({ text: a.name });
-                }
-            }
-
-            const contentEl = bubble.createDiv({ cls: 'vc-bubble-content' });
-            if (msg.role === 'user') {
-                contentEl.textContent = msg.content;
-            } else if (msg.content === '…') {
-                contentEl.addClass('vc-loading');
-                contentEl.createSpan({ cls: 'vc-dot' });
-                contentEl.createSpan({ cls: 'vc-dot' });
-                contentEl.createSpan({ cls: 'vc-dot' });
-            } else {
-                MarkdownRenderer.renderMarkdown(msg.content, contentEl, '', this.plugin);
-
-                const actions = bubble.createDiv({ cls: 'vc-bubble-actions' });
-
-                const saveBtn = actions.createEl('button', { cls: 'vc-action-btn', text: 'Save to note' });
-                saveBtn.addEventListener('click', () => {
-                    new DiffPreview(
-                        this.plugin.app,
-                        msg.content,
-                        async (final, _c, _t) => { await this.createNewNoteWithContent(final); }
-                    ).open();
-                });
-
-                const applyBtn = actions.createEl('button', { cls: 'vc-action-btn', text: 'Apply to active note' });
-                applyBtn.addEventListener('click', async () => {
-                    const af = this.plugin.app.workspace.getActiveFile();
-                    if (!af) { new Notice('No active note.'); return; }
-                    let content = msg.content;
-                    const match = content.match(/```markdown\r?\n([\s\S]*?)\r?\n```/i);
-                    if (match) content = match[1];
-                    new DiffPreview(this.plugin.app, content, async (final) => {
-                        await this.plugin.app.vault.modify(af, final);
-                        new Notice(`Applied to ${af.name}`);
-                    }).open();
-                });
-            }
+            this.messagesDiv.appendChild(this.buildBubble(msg));
         }
 
         this.messagesDiv.scrollTop = this.messagesDiv.scrollHeight;
+    }
+
+    /**
+     * Builds a single message bubble element from a ChatMessage.
+     * Used by both renderMessages() (full rebuild) and future incremental appends.
+     */
+    private buildBubble(msg: ChatMessage): HTMLElement {
+        const isUser = msg.role === 'user';
+        const isLoading = msg.role === 'assistant' && msg.content === '…';
+
+        const row = document.createElement('div');
+        row.className = `vc-msg-row vc-msg-row-${isUser ? 'user' : 'ai'}`;
+
+        // ── Avatar ────────────────────────────────────────────────────────────
+        const avatar = row.createDiv({ cls: `vc-avatar vc-avatar-${isUser ? 'user' : 'ai'}` });
+        setIcon(avatar, isUser ? 'user' : 'bot');
+
+        // ── Bubble column ─────────────────────────────────────────────────────
+        const col = row.createDiv({ cls: 'vc-msg-col' });
+
+        // Sender label
+        col.createDiv({ cls: 'vc-sender-label', text: isUser ? 'You' : 'Vault Copilot' });
+
+        // Attachment pills inside user messages
+        if (isUser && msg.attachments && msg.attachments.length > 0) {
+            const attBadge = col.createDiv({ cls: 'vc-bubble-attachments' });
+            for (const a of msg.attachments) {
+                const p = attBadge.createDiv({ cls: 'vc-bubble-att-pill' });
+                const ic = p.createSpan();
+                setIcon(ic, 'file');
+                p.createSpan({ text: a.name });
+            }
+        }
+
+        // Bubble content
+        const bubble = col.createDiv({ cls: `vc-bubble vc-bubble-${isUser ? 'user' : 'ai'}` });
+
+        if (isLoading) {
+            // Spinner (reference-style — rotating arc, not bouncing dots)
+            const spinner = bubble.createDiv({ cls: 'vc-spinner' });
+            spinner.createDiv({ cls: 'vc-spinner-arc' });
+        } else if (isUser) {
+            bubble.textContent = msg.content;
+        } else {
+            // AI message — render markdown
+            MarkdownRenderer.renderMarkdown(msg.content, bubble, '', this.plugin);
+
+            // Copy + action buttons on hover
+            const actions = col.createDiv({ cls: 'vc-bubble-actions' });
+
+            const copyBtn = actions.createEl('button', { cls: 'vc-action-btn' });
+            setIcon(copyBtn, 'copy');
+            copyBtn.title = 'Copy';
+            copyBtn.addEventListener('click', async () => {
+                await navigator.clipboard.writeText(msg.content);
+                setIcon(copyBtn, 'check');
+                setTimeout(() => setIcon(copyBtn, 'copy'), 1500);
+            });
+
+            const saveBtn = actions.createEl('button', { cls: 'vc-action-btn', text: 'Save to note' });
+            saveBtn.addEventListener('click', () => {
+                new DiffPreview(
+                    this.plugin.app,
+                    msg.content,
+                    async (final, _c, _t) => { await this.createNewNoteWithContent(final); }
+                ).open();
+            });
+
+            const applyBtn = actions.createEl('button', { cls: 'vc-action-btn', text: 'Apply to note' });
+            applyBtn.addEventListener('click', async () => {
+                const af = this.plugin.app.workspace.getActiveFile();
+                if (!af) { new Notice('No active note.'); return; }
+                let content = msg.content;
+                const match = content.match(/```markdown\r?\n([\s\S]*?)\r?\n```/i);
+                if (match) content = match[1];
+                new DiffPreview(this.plugin.app, content, async (final) => {
+                    await this.plugin.app.vault.modify(af, final);
+                    new Notice(`Applied to ${af.name}`);
+                }).open();
+            });
+        }
+
+        return row;
     }
 
     async createNewNoteWithContent(content: string) {
@@ -493,7 +511,6 @@ export class ChatPanel extends ItemView {
         this.renderMessages();
 
         try {
-            // Always use the active session model
             this.llmProvider.settings = { ...this.plugin.settings, defaultModel: this.activeModel };
 
             const toSend = [...this.messages.slice(0, -1)];

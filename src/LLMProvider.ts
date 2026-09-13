@@ -8,45 +8,98 @@ export interface ChatMessage {
     attachments?: Array<{
         name: string;
         mimeType: string;
-        data: ArrayBuffer; // We will convert to Base64
+        data: ArrayBuffer;
     }>;
 }
 
+// ── Improvement A: typed provider union ───────────────────────────────────────
+// Using a string union (not an enum) keeps the prefix syntax readable in
+// settings and avoids a runtime enum-value lookup.
+type ModelProvider = 'openrouter' | 'openai' | 'gemini';
+
+interface ParsedModel {
+    provider: ModelProvider;
+    modelId: string;
+}
+
+/** Splits "openrouter:deepseek/deepseek-chat-v3-0324:free" into provider + id. */
+function parseModelString(raw: string): ParsedModel {
+    const colonIdx = raw.indexOf(':');
+    if (colonIdx === -1) {
+        // Legacy un-prefixed value (e.g. "gpt-4o" or "gemini-1.5-flash")
+        if (raw.startsWith('gpt') || raw.startsWith('o1') || raw.startsWith('o3')) {
+            return { provider: 'openai', modelId: raw };
+        }
+        if (raw.startsWith('gemini')) {
+            return { provider: 'gemini', modelId: raw };
+        }
+        throw new Error(`Unknown model: "${raw}". Use the format provider:model-id (e.g. openai:gpt-4o).`);
+    }
+
+    const prefix = raw.slice(0, colonIdx);
+    const modelId = raw.slice(colonIdx + 1);
+
+    const validProviders: ModelProvider[] = ['openrouter', 'openai', 'gemini'];
+    if (!validProviders.includes(prefix as ModelProvider)) {
+        throw new Error(`Unknown provider prefix "${prefix}" in model "${raw}". Valid prefixes: ${validProviders.join(', ')}.`);
+    }
+
+    return { provider: prefix as ModelProvider, modelId };
+}
+
+// ── Improvement B: provider → API key map ────────────────────────────────────
+// One place to see which setting key each provider needs, instead of
+// duplicating the "key missing" check inside every callXxx() method.
+
 export class LLMProvider {
     settings: VaultCopilotSettings;
+
+    // Lazily-evaluated key getters. Using arrow functions (not closures over
+    // `this.settings`) because `settings` may be replaced between calls.
+    private readonly providerKeyMap: Record<ModelProvider, () => string> = {
+        openrouter: () => (this.settings.openrouterApiKey || '').trim(),
+        openai:     () => (this.settings.openaiApiKey     || '').trim(),
+        gemini:     () => (this.settings.geminiApiKey     || '').trim(),
+    };
 
     constructor(settings: VaultCopilotSettings) {
         this.settings = settings;
     }
 
+    /** Returns the API key for `provider`, or throws a user-visible error. */
+    private requireApiKey(provider: ModelProvider): string {
+        const key = this.providerKeyMap[provider]();
+        if (!key) {
+            const settingNames: Record<ModelProvider, string> = {
+                openrouter: 'OpenRouter API Key',
+                openai:     'OpenAI API Key',
+                gemini:     'Gemini API Key',
+            };
+            throw new Error(
+                `${settingNames[provider]} is missing. ` +
+                `Add it in Settings → Vault Copilot → ${settingNames[provider]}.`
+            );
+        }
+        return key;
+    }
+
     async generateResponse(messages: ChatMessage[]): Promise<string> {
         const raw = (this.settings.defaultModel || 'openrouter:deepseek/deepseek-chat-v3-0324:free').trim();
+        const { provider, modelId } = parseModelString(raw);
 
-        if (raw.startsWith('openrouter:')) {
-            const modelId = raw.slice('openrouter:'.length);
-            return this.callOpenRouter(modelId, messages);
-        } else if (raw.startsWith('openai:')) {
-            const modelId = raw.slice('openai:'.length);
-            return this.callOpenAI(modelId, messages);
-        } else if (raw.startsWith('gemini:')) {
-            const modelId = raw.slice('gemini:'.length);
-            return this.callGemini(modelId, messages);
-        } else if (raw.startsWith('gpt')) {
-            // Legacy unprefixed OpenAI model value
-            return this.callOpenAI(raw, messages);
-        } else if (raw.startsWith('gemini')) {
-            // Legacy unprefixed Gemini model value
-            return this.callGemini(raw, messages);
-        } else {
-            throw new Error(`Unknown model: "${raw}". Check the model setting.`);
+        // TypeScript exhaustiveness — if a new provider is added to the union
+        // without a case here, the compiler will flag it.
+        switch (provider) {
+            case 'openrouter': return this.callOpenRouter(modelId, messages);
+            case 'openai':     return this.callOpenAI(modelId, messages);
+            case 'gemini':     return this.callGemini(modelId, messages);
         }
     }
 
     private arrayBufferToBase64(buffer: ArrayBuffer): string {
         let binary = '';
         const bytes = new Uint8Array(buffer);
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
+        for (let i = 0; i < bytes.byteLength; i++) {
             binary += String.fromCharCode(bytes[i]);
         }
         return window.btoa(binary);
@@ -63,10 +116,7 @@ export class LLMProvider {
      * don't accept binary inlineData — only the Gemini direct API does that.
      */
     private async callOpenRouter(modelId: string, messages: ChatMessage[]): Promise<string> {
-        const apiKey = (this.settings.openrouterApiKey || '').trim();
-        if (!apiKey) {
-            throw new Error('OpenRouter API key is missing. Add it in plugin Settings → OpenRouter API Key.');
-        }
+        const apiKey = this.requireApiKey('openrouter');
 
         const orMessages = await Promise.all(messages.map(async msg => {
             if (!msg.attachments || msg.attachments.length === 0) {
@@ -97,7 +147,16 @@ export class LLMProvider {
             return { role: msg.role, content: parts };
         }));
 
-        const request = {
+        // Improvement C: explicit serialize-and-catch so a binary blob leaking
+        // into the payload throws a clear error instead of silently becoming {}.
+        let body: string;
+        try {
+            body = JSON.stringify({ model: modelId, messages: orMessages });
+        } catch (err) {
+            throw new Error(`Failed to serialize OpenRouter request: ${(err as Error).message}`);
+        }
+
+        const request: RequestUrlParam = {
             url: 'https://openrouter.ai/api/v1/chat/completions',
             method: 'POST',
             headers: {
@@ -106,7 +165,7 @@ export class LLMProvider {
                 'HTTP-Referer': 'obsidian://vault-copilot',
                 'X-Title': 'Vault Copilot',
             },
-            body: JSON.stringify({ model: modelId, messages: orMessages }),
+            body,
             throw: false,
         };
 
@@ -123,67 +182,70 @@ export class LLMProvider {
     }
 
     private async callOpenAI(model: string, messages: ChatMessage[]): Promise<string> {
-        const apiKey = (this.settings.openaiApiKey || '').trim();
-        if (!apiKey) {
-            throw new Error("OpenAI API key is missing. Please set it in the plugin settings.");
-        }
+        const apiKey = this.requireApiKey('openai');
 
         const openAiMessages = await Promise.all(messages.map(async msg => {
             if (!msg.attachments || msg.attachments.length === 0) {
                 return { role: msg.role, content: msg.content };
             }
 
-            // If there are attachments, format as array (OpenAI Vision API style)
-            const contentParts: any[] = [{ type: "text", text: msg.content }];
-            
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const contentParts: any[] = [{ type: 'text', text: msg.content }];
+
             for (const att of msg.attachments) {
-                const base64 = this.arrayBufferToBase64(att.data);
-                // Note: OpenAI chat/completions natively supports images, but for PDFs it requires Assistants API.
-                // We will try sending it as an image URL just in case, or warn if it's a PDF.
                 if (att.mimeType.startsWith('image/')) {
+                    const base64 = this.arrayBufferToBase64(att.data);
                     contentParts.push({
-                        type: "image_url",
+                        type: 'image_url',
                         image_url: { url: `data:${att.mimeType};base64,${base64}` }
                     });
                 } else if (att.mimeType === 'application/pdf') {
+                    // OpenAI's standard chat/completions endpoint does not accept
+                    // native PDF binary — extract text first as a fallback.
                     try {
                         const extractedText = await PDFHandler.extractPdfText(att.data);
-                        contentParts.push({ 
-                            type: "text", 
-                            text: `\n--- Attachment: ${att.name} (Extracted Text) ---\n${extractedText}\n--- End Attachment ---\n` 
+                        contentParts.push({
+                            type: 'text',
+                            text: `\n--- Attachment: ${att.name} (Extracted Text) ---\n${extractedText}\n--- End Attachment ---\n`
                         });
                     } catch (e) {
                         console.error(`Failed to extract text from PDF: ${att.name}`, e);
-                        contentParts.push({ type: "text", text: `\n--- Attachment: ${att.name} ---\n[UNREADABLE SECTION - PDF EXTRACTION FAILED]\n--- End Attachment ---\n` });
+                        contentParts.push({
+                            type: 'text',
+                            text: `\n--- Attachment: ${att.name} ---\n[UNREADABLE SECTION - PDF EXTRACTION FAILED]\n--- End Attachment ---\n`
+                        });
                     }
+                } else if (att.mimeType === 'text/plain' || att.mimeType === 'text/markdown') {
+                    const text = new TextDecoder('utf-8').decode(att.data);
+                    contentParts.push({
+                        type: 'text',
+                        text: `\n--- Attachment: ${att.name} ---\n${text}\n--- End Attachment ---\n`
+                    });
                 } else {
-                    // For non-images on OpenAI without text extraction, this might fail or be ignored.
-                    // We just pass it as text if it's txt/md.
-                    if (att.mimeType === 'text/plain' || att.mimeType === 'text/markdown') {
-                        const decoder = new TextDecoder('utf-8');
-                        const text = decoder.decode(att.data);
-                        contentParts.push({ type: "text", text: `\n--- Attachment: ${att.name} ---\n${text}\n--- End Attachment ---\n` });
-                    } else {
-                        console.warn(`OpenAI standard chat may not support native ${att.mimeType} inline.`);
-                    }
+                    console.warn(`OpenAI standard chat may not support native ${att.mimeType} inline.`);
                 }
             }
 
             return { role: msg.role, content: contentParts };
         }));
 
+        // Improvement C: explicit serialize-and-catch.
+        let body: string;
+        try {
+            body = JSON.stringify({ model, messages: openAiMessages });
+        } catch (err) {
+            throw new Error(`Failed to serialize OpenAI request: ${(err as Error).message}`);
+        }
+
         const request: RequestUrlParam = {
             url: 'https://api.openai.com/v1/chat/completions',
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-                model: model,
-                messages: openAiMessages
-            }),
-            throw: false
+            body,
+            throw: false,
         };
 
         try {
@@ -193,70 +255,67 @@ export class LLMProvider {
             }
             return response.json.choices[0].message.content;
         } catch (error) {
-            console.error("LLMProvider OpenAI Error:", error);
+            console.error('LLMProvider OpenAI Error:', error);
             throw new Error(`Failed to get response from OpenAI: ${(error as Error).message}`);
         }
     }
 
     private async callGemini(model: string, messages: ChatMessage[]): Promise<string> {
-        const apiKey = (this.settings.geminiApiKey || '').trim();
-        if (!apiKey) {
-            throw new Error("Gemini API key is missing. Please set it in the plugin settings.");
-        }
+        const apiKey = this.requireApiKey('gemini');
 
         const geminiContents = messages.filter(msg => msg.role !== 'system').map(msg => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const parts: any[] = [];
-            
+
             if (msg.content) {
                 parts.push({ text: msg.content });
             }
 
             if (msg.attachments) {
                 for (const att of msg.attachments) {
-                    const base64 = this.arrayBufferToBase64(att.data);
                     if (att.mimeType === 'text/plain' || att.mimeType === 'text/markdown') {
-                        const decoder = new TextDecoder('utf-8');
-                        const text = decoder.decode(att.data);
+                        const text = new TextDecoder('utf-8').decode(att.data);
                         parts.push({ text: `\n--- Attachment: ${att.name} ---\n${text}\n--- End Attachment ---\n` });
                     } else {
-                        // Gemini supports inlineData for PDF and images
-                        parts.push({
-                            inlineData: {
-                                mimeType: att.mimeType,
-                                data: base64
-                            }
-                        });
+                        // Gemini accepts inlineData for PDF and images natively.
+                        const base64 = this.arrayBufferToBase64(att.data);
+                        parts.push({ inlineData: { mimeType: att.mimeType, data: base64 } });
                     }
                 }
             }
 
             return {
                 role: msg.role === 'assistant' ? 'model' : 'user',
-                parts: parts
+                parts,
             };
         });
 
-        // Handle system instructions
+        // System messages become a top-level systemInstruction field in Gemini's API.
         const systemMessages = messages.filter(msg => msg.role === 'system');
-        const systemInstruction = systemMessages.length > 0 
+        const systemInstruction = systemMessages.length > 0
             ? { parts: [{ text: systemMessages.map(m => m.content).join('\n') }] }
             : undefined;
 
-        const requestBody: any = {
-            contents: geminiContents,
-        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const payload: any = { contents: geminiContents };
         if (systemInstruction) {
-            requestBody.systemInstruction = systemInstruction;
+            payload.systemInstruction = systemInstruction;
+        }
+
+        // Improvement C: explicit serialize-and-catch.
+        let body: string;
+        try {
+            body = JSON.stringify(payload);
+        } catch (err) {
+            throw new Error(`Failed to serialize Gemini request: ${(err as Error).message}`);
         }
 
         const request: RequestUrlParam = {
             url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestBody),
-            throw: false
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            throw: false,
         };
 
         try {
@@ -267,9 +326,9 @@ export class LLMProvider {
             if (response.json.candidates && response.json.candidates.length > 0) {
                 return response.json.candidates[0].content.parts[0].text;
             }
-            throw new Error("No response candidates returned from Gemini.");
+            throw new Error('No response candidates returned from Gemini.');
         } catch (error) {
-            console.error("LLMProvider Gemini Error:", error);
+            console.error('LLMProvider Gemini Error:', error);
             throw new Error(`Failed to get response from Gemini: ${(error as Error).message}`);
         }
     }

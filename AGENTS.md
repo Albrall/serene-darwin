@@ -149,7 +149,7 @@ Don't create files outside this structure without explaining why first.
 - **Phase 3 (Interactive note editing):** ✅ Complete
 - **Phase 4 (Image extraction):** ✅ Complete
 - **Phase 5 (RAG via Omnisearch):** ✅ Complete
-- **Phase 6 (Persistent Memory):** in progress
+- **Phase 6 (Persistent Memory):** ✅ Complete
 ### Status protocol — read this carefully
 
 - You may mark a phase **"🧪 Ready for testing"** once you believe the
