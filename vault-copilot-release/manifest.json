@@ -1,0 +1,10 @@
+{
+	"id": "vault-copilot",
+	"name": "Vault Copilot",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "A personal Obsidian plugin for medical-lecture-notes workflow.",
+	"author": "Vault Copilot Team",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
