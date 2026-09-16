@@ -1,4 +1,4 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, loadPdfJs } from 'obsidian';
 
 export interface AttachmentData {
     name: string;
@@ -28,21 +28,18 @@ export class PDFHandler {
     }
 
     /**
-     * Extracts plain text from a PDF ArrayBuffer using Obsidian's bundled pdf.js
-     * (`window.pdfjsLib`). Text only — no image extraction — keeping it
-     * lightweight and safe for iPadOS.
-     *
-     * Used as a fallback when the selected model is OpenAI, which does not
-     * accept native PDF binary data on the standard `/v1/chat/completions`
-     * endpoint (unlike Gemini, which accepts inlineData for PDFs).
-     *
-     * `window.pdfjsLib` typed as `any` because there are no TypeScript
-     * declarations for Obsidian's embedded pdf.js in this project's
-     * devDependencies — no alternative.
+     * Extracts plain text from a PDF ArrayBuffer using Obsidian's bundled pdf.js.
+     * Text only — no image extraction — keeping it lightweight and safe for iPadOS.
      */
     static async extractPdfText(data: ArrayBuffer): Promise<string> {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pdfjsLib = (window as any).pdfjsLib;
+        let pdfjsLib;
+        try {
+            pdfjsLib = await loadPdfJs();
+        } catch (error) {
+            console.error("Failed to load pdf.js:", error);
+            throw new Error('Failed to load pdf.js. Cannot extract PDF text.');
+        }
+
         if (!pdfjsLib) {
             throw new Error(
                 'pdf.js (pdfjsLib) is not available in this Obsidian environment. ' +
@@ -70,61 +67,13 @@ export class PDFHandler {
                 .map((item: any) => item.str + (item.hasEOL ? '\n' : ' '))
                 .join('');
 
-            // Code-level Arabic-script strip — fallback for when the extraction
-            // LLM ignores the English-only instruction on bilingual slides.
-            // Covers all standard Arabic Unicode blocks:
-            //   U+0600–06FF  Arabic
-            //   U+0750–077F  Arabic Supplement
-            //   U+08A0–08FF  Arabic Extended-A
-            //   U+FB50–FDFF  Arabic Presentation Forms-A
-            //   U+FE70–FEFF  Arabic Presentation Forms-B
-            const pageText = PDFHandler.stripArabicScript(rawPageText);
+            const pageText = rawPageText;
 
             pageTexts.push(pageText.trimEnd());
         }
 
         // Separate pages with a blank line so heading structure is preserved
         return pageTexts.join('\n\n');
-    }
-
-    /**
-     * Removes all Arabic-script characters from a string.
-     *
-     * This is a code-level fallback used by extractPdfText() for the OpenAI/
-     * pdf.js path. The extraction LLM is instructed to output English-only, but
-     * that instruction is not guaranteed — particularly on bilingual slides where
-     * the Arabic definition appears immediately adjacent to the English one and
-     * the model picks up both. This regex is the hard guarantee.
-     *
-     * Unicode blocks covered:
-     *   U+0600–06FF  Arabic (core block)
-     *   U+0750–077F  Arabic Supplement
-     *   U+08A0–08FF  Arabic Extended-A
-     *   U+FB50–FDFF  Arabic Presentation Forms-A
-     *   U+FE70–FEFF  Arabic Presentation Forms-B
-     *
-     * After removal, runs of multiple spaces on a line are collapsed to one,
-     * and lines that become entirely whitespace are removed, so the output
-     * remains clean for downstream LLM processing.
-     */
-    static stripArabicScript(text: string): string {
-        // eslint-disable-next-line no-misleading-character-class
-        const arabicBlocks = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+/g;
-
-        return text
-            .replace(arabicBlocks, '')      // remove Arabic characters
-            .replace(/[ \t]{2,}/g, ' ')     // collapse runs of spaces/tabs on each line
-            .split('\n')
-            .map(line => line.trimEnd())
-            .filter((line, i, arr) => {
-                // Remove lines that are now blank, but keep intentional blank
-                // separator lines (i.e. don't collapse all blank lines — only
-                // runs of more than one consecutive blank line).
-                if (line.trim() !== '') return true;
-                const prev = arr[i - 1];
-                return prev !== undefined && prev.trim() !== '';
-            })
-            .join('\n');
     }
 
     /**

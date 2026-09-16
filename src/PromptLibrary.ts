@@ -158,8 +158,6 @@ Return ONLY the JSON block. No prose before or after it.`;
      *
      * Key rules enforced here:
      * - Bullet/paragraph structure must be preserved (one bullet per line).
-     * - Output must be English-only; if a slide contains both Arabic and English,
-     *   extract the English text only.
      * - Placeholder markers ([UNREADABLE SECTION], screenshot notices) are
      *   pipeline markers for the user — they are NOT concepts and must never
      *   be written as if they are headings or key terms.
@@ -175,7 +173,7 @@ Rules:
 - Preserve bolded or emphasised terms (use **bold** markdown).
 - Do NOT summarise — output the complete text.
 - Do NOT add any commentary, preamble, or closing remarks.
-- **English only**: if a slide or section contains text in both Arabic and English (e.g. an Arabic definition alongside an English one), extract the English text only. Omit the Arabic entirely.
+- **Language**: Preserve the original language of the text. If a slide contains Arabic text, extract it accurately alongside the English text.
 - **Unreadable content**: if you genuinely cannot read a section, output exactly the marker \`[UNREADABLE SECTION]\` on its own line. This is a pipeline marker for the user — do NOT treat it as a heading, concept, or key term, and do NOT add explanatory prose around it.
 - **Images, diagrams, charts**: you MUST NOT silently skip them and MUST NOT invent a detailed analysis. Output exactly \`📷 [MANUAL SCREENSHOT NEEDED: brief description of what the image shows and its context]\` on its own line so the user knows where to manually paste it later. This is also a pipeline marker — not a concept.
 

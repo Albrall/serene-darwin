@@ -34,14 +34,7 @@ treat it as higher priority than your own default conventions.
    run the full pipeline (extract → summarize → dynamic concept-link →
    tag → conflict-check) in one action — the user should never need to
    write or invoke a custom prompt manually for this core workflow.
-7. **All external HTTP calls MUST use Obsidian's `requestUrl`**
-   (`import { requestUrl } from 'obsidian'`) — never `fetch`, `axios`,
-   or any SDK that relies on browser fetch internally. Regular fetch
-   hits CORS restrictions on mobile; `requestUrl` bypasses them.
-   **Known tradeoff: `requestUrl` does not support streaming responses.**
-   Chat replies will arrive as a single complete block, not token-by-
-   token. This is an accepted tradeoff for mobile reliability — do not
-   attempt to work around it with a fetch-based streaming hack.
+7. **External HTTP calls and Streaming:** We now allow using standard `fetch` with Server-Sent Events (SSE) to support token-by-token streaming on mobile, achieving feature parity with logancyang/obsidian-copilot. While `requestUrl` bypasses CORS, it lacks streaming support. To provide real-time chat replies on the iPad, use `fetch` and handle streaming chunks. Providers like OpenRouter and Gemini generally set permissive CORS headers (`Access-Control-Allow-Origin: *`), making them compatible with this approach. Fall back gracefully or show clear error messages if a specific model/provider blocks the request.
 8. **PDF files have no real filesystem path on iOS** (`file.path` is
    unavailable in the sandbox). Read uploaded PDFs as an `ArrayBuffer`
    directly from the file input/drop event, OR — if the PDF already

@@ -83,16 +83,16 @@ export class LLMProvider {
         return key;
     }
 
-    async generateResponse(messages: ChatMessage[]): Promise<string> {
+    async generateResponse(messages: ChatMessage[], onToken?: (chunk: string) => void): Promise<string> {
         const raw = (this.settings.defaultModel || 'openrouter:deepseek/deepseek-chat-v3-0324:free').trim();
         const { provider, modelId } = parseModelString(raw);
 
         // TypeScript exhaustiveness — if a new provider is added to the union
         // without a case here, the compiler will flag it.
         switch (provider) {
-            case 'openrouter': return this.callOpenRouter(modelId, messages);
-            case 'openai':     return this.callOpenAI(modelId, messages);
-            case 'gemini':     return this.callGemini(modelId, messages);
+            case 'openrouter': return this.callOpenRouter(modelId, messages, onToken);
+            case 'openai':     return this.callOpenAI(modelId, messages, onToken);
+            case 'gemini':     return this.callGemini(modelId, messages, onToken);
         }
     }
 
@@ -115,7 +115,7 @@ export class LLMProvider {
      * PDF attachments are text-extracted first since OpenRouter models generally
      * don't accept binary inlineData — only the Gemini direct API does that.
      */
-    private async callOpenRouter(modelId: string, messages: ChatMessage[]): Promise<string> {
+    private async callOpenRouter(modelId: string, messages: ChatMessage[], onToken?: (chunk: string) => void): Promise<string> {
         const apiKey = this.requireApiKey('openrouter');
 
         const orMessages = await Promise.all(messages.map(async msg => {
@@ -147,41 +147,88 @@ export class LLMProvider {
             return { role: msg.role, content: parts };
         }));
 
-        // Improvement C: explicit serialize-and-catch so a binary blob leaking
-        // into the payload throws a clear error instead of silently becoming {}.
         let body: string;
         try {
-            body = JSON.stringify({ model: modelId, messages: orMessages });
+            body = JSON.stringify({ model: modelId, messages: orMessages, stream: !!onToken });
         } catch (err) {
             throw new Error(`Failed to serialize OpenRouter request: ${(err as Error).message}`);
         }
 
-        const request: RequestUrlParam = {
-            url: 'https://openrouter.ai/api/v1/chat/completions',
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'obsidian://vault-copilot',
-                'X-Title': 'Vault Copilot',
-            },
-            body,
-            throw: false,
+        const headers = {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'obsidian://vault-copilot',
+            'X-Title': 'Vault Copilot',
         };
 
-        try {
-            const response = await requestUrl(request);
-            if (response.status !== 200) {
-                throw new Error(`OpenRouter error ${response.status}: ${JSON.stringify(response.json)}`);
+        if (onToken) {
+            try {
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers,
+                    body
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`OpenRouter error ${response.status}: ${await response.text()}`);
+                }
+
+                if (!response.body) throw new Error("No response body");
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let fullContent = '';
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                        const line = buffer.slice(0, newlineIndex).trim();
+                        buffer = buffer.slice(newlineIndex + 1);
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                                const parsed = JSON.parse(line.slice(6));
+                                const content = parsed.choices[0]?.delta?.content || '';
+                                if (content) {
+                                    fullContent += content;
+                                    onToken(content);
+                                }
+                            } catch (e) {
+                                // ignore parse errors on partial chunks
+                            }
+                        }
+                    }
+                }
+                return fullContent;
+            } catch (error) {
+                console.error('LLMProvider OpenRouter streaming error:', error);
+                throw new Error(`OpenRouter streaming failed (check CORS or connection): ${(error as Error).message}`);
             }
-            return response.json.choices[0].message.content;
-        } catch (error) {
-            console.error('LLMProvider OpenRouter error:', error);
-            throw new Error(`OpenRouter request failed: ${(error as Error).message}`);
+        } else {
+            const request: RequestUrlParam = {
+                url: 'https://openrouter.ai/api/v1/chat/completions',
+                method: 'POST',
+                headers,
+                body,
+                throw: false,
+            };
+
+            try {
+                const response = await requestUrl(request);
+                if (response.status !== 200) {
+                    throw new Error(`OpenRouter error ${response.status}: ${JSON.stringify(response.json)}`);
+                }
+                return response.json.choices[0].message.content;
+            } catch (error) {
+                console.error('LLMProvider OpenRouter error:', error);
+                throw new Error(`OpenRouter request failed: ${(error as Error).message}`);
+            }
         }
     }
 
-    private async callOpenAI(model: string, messages: ChatMessage[]): Promise<string> {
+    private async callOpenAI(model: string, messages: ChatMessage[], onToken?: (chunk: string) => void): Promise<string> {
         const apiKey = this.requireApiKey('openai');
 
         const openAiMessages = await Promise.all(messages.map(async msg => {
@@ -229,68 +276,109 @@ export class LLMProvider {
             return { role: msg.role, content: contentParts };
         }));
 
-        // Improvement C: explicit serialize-and-catch.
         let body: string;
         try {
-            body = JSON.stringify({ model, messages: openAiMessages });
+            body = JSON.stringify({ model, messages: openAiMessages, stream: !!onToken });
         } catch (err) {
             throw new Error(`Failed to serialize OpenAI request: ${(err as Error).message}`);
         }
 
-        const request: RequestUrlParam = {
-            url: 'https://api.openai.com/v1/chat/completions',
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-            },
-            body,
-            throw: false,
+        const headers = {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
         };
 
-        try {
-            const response = await requestUrl(request);
-            if (response.status !== 200) {
-                throw new Error(`OpenAI API error: ${response.status} - ${JSON.stringify(response.json)}`);
+        if (onToken) {
+            try {
+                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers,
+                    body
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
+                }
+
+                if (!response.body) throw new Error("No response body");
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let fullContent = '';
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                        const line = buffer.slice(0, newlineIndex).trim();
+                        buffer = buffer.slice(newlineIndex + 1);
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                                const parsed = JSON.parse(line.slice(6));
+                                const content = parsed.choices[0]?.delta?.content || '';
+                                if (content) {
+                                    fullContent += content;
+                                    onToken(content);
+                                }
+                            } catch (e) {
+                                // ignore parse errors on partial chunks
+                            }
+                        }
+                    }
+                }
+                return fullContent;
+            } catch (error) {
+                console.error('LLMProvider OpenAI streaming error:', error);
+                throw new Error(`OpenAI streaming failed (check CORS or connection): ${(error as Error).message}`);
             }
-            return response.json.choices[0].message.content;
-        } catch (error) {
-            console.error('LLMProvider OpenAI Error:', error);
-            throw new Error(`Failed to get response from OpenAI: ${(error as Error).message}`);
+        } else {
+            const request: RequestUrlParam = {
+                url: 'https://api.openai.com/v1/chat/completions',
+                method: 'POST',
+                headers,
+                body,
+                throw: false,
+            };
+
+            try {
+                const response = await requestUrl(request);
+                if (response.status !== 200) {
+                    throw new Error(`OpenAI API error: ${response.status} - ${JSON.stringify(response.json)}`);
+                }
+                return response.json.choices[0].message.content;
+            } catch (error) {
+                console.error('LLMProvider OpenAI Error:', error);
+                throw new Error(`Failed to get response from OpenAI: ${(error as Error).message}`);
+            }
         }
     }
 
-    private async callGemini(model: string, messages: ChatMessage[]): Promise<string> {
+    private async callGemini(model: string, messages: ChatMessage[], onToken?: (chunk: string) => void): Promise<string> {
         const apiKey = this.requireApiKey('gemini');
 
-        const geminiContents = messages.filter(msg => msg.role !== 'system').map(msg => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const parts: any[] = [];
-
-            if (msg.content) {
-                parts.push({ text: msg.content });
+        const geminiContents = await Promise.all(messages.filter(msg => msg.role !== 'system').map(async msg => {
+            const role = msg.role === 'assistant' ? 'model' : 'user';
+            
+            if (!msg.attachments || msg.attachments.length === 0) {
+                return { role, parts: [{ text: msg.content }] };
             }
 
-            if (msg.attachments) {
-                for (const att of msg.attachments) {
-                    if (att.mimeType === 'text/plain' || att.mimeType === 'text/markdown') {
-                        const text = new TextDecoder('utf-8').decode(att.data);
-                        parts.push({ text: `\n--- Attachment: ${att.name} ---\n${text}\n--- End Attachment ---\n` });
-                    } else {
-                        // Gemini accepts inlineData for PDF and images natively.
-                        const base64 = this.arrayBufferToBase64(att.data);
-                        parts.push({ inlineData: { mimeType: att.mimeType, data: base64 } });
-                    }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const parts: any[] = [{ text: msg.content }];
+            for (const att of msg.attachments) {
+                if (att.mimeType === 'text/plain' || att.mimeType === 'text/markdown') {
+                    const text = new TextDecoder('utf-8').decode(att.data);
+                    parts.push({ text: `\n--- ${att.name} ---\n${text}\n---\n` });
+                } else {
+                    const base64 = this.arrayBufferToBase64(att.data);
+                    parts.push({ inlineData: { mimeType: att.mimeType, data: base64 } });
                 }
             }
+            return { role, parts };
+        }));
 
-            return {
-                role: msg.role === 'assistant' ? 'model' : 'user',
-                parts,
-            };
-        });
-
-        // System messages become a top-level systemInstruction field in Gemini's API.
         const systemMessages = messages.filter(msg => msg.role === 'system');
         const systemInstruction = systemMessages.length > 0
             ? { parts: [{ text: systemMessages.map(m => m.content).join('\n') }] }
@@ -302,7 +390,6 @@ export class LLMProvider {
             payload.systemInstruction = systemInstruction;
         }
 
-        // Improvement C: explicit serialize-and-catch.
         let body: string;
         try {
             body = JSON.stringify(payload);
@@ -310,26 +397,74 @@ export class LLMProvider {
             throw new Error(`Failed to serialize Gemini request: ${(err as Error).message}`);
         }
 
-        const request: RequestUrlParam = {
-            url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body,
-            throw: false,
-        };
+        if (onToken) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body
+                });
 
-        try {
-            const response = await requestUrl(request);
-            if (response.status !== 200) {
-                throw new Error(`Gemini API error: ${response.status} - ${JSON.stringify(response.json)}`);
+                if (!response.ok) {
+                    throw new Error(`Gemini error ${response.status}: ${await response.text()}`);
+                }
+
+                if (!response.body) throw new Error("No response body");
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let fullContent = '';
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                        const line = buffer.slice(0, newlineIndex).trim();
+                        buffer = buffer.slice(newlineIndex + 1);
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                                const parsed = JSON.parse(line.slice(6));
+                                const content = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                                if (content) {
+                                    fullContent += content;
+                                    onToken(content);
+                                }
+                            } catch (e) {
+                                // ignore parse errors on partial chunks
+                            }
+                        }
+                    }
+                }
+                return fullContent;
+            } catch (error) {
+                console.error('LLMProvider Gemini streaming error:', error);
+                throw new Error(`Gemini streaming failed: ${(error as Error).message}`);
             }
-            if (response.json.candidates && response.json.candidates.length > 0) {
-                return response.json.candidates[0].content.parts[0].text;
+        } else {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+            const request: RequestUrlParam = {
+                url,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                throw: false,
+            };
+
+            try {
+                const response = await requestUrl(request);
+                if (response.status !== 200) {
+                    throw new Error(`Gemini error ${response.status}: ${JSON.stringify(response.json)}`);
+                }
+                const text = response.json.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!text) throw new Error('Gemini returned an empty or invalid response structure.');
+                return text;
+            } catch (error) {
+                console.error('LLMProvider Gemini Error:', error);
+                throw new Error(`Gemini request failed: ${(error as Error).message}`);
             }
-            throw new Error('No response candidates returned from Gemini.');
-        } catch (error) {
-            console.error('LLMProvider Gemini Error:', error);
-            throw new Error(`Failed to get response from Gemini: ${(error as Error).message}`);
         }
     }
 }

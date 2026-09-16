@@ -8,7 +8,10 @@ const prod = (process.argv[2] === "production");
 
 // Output destination: scratch test vault plugin folder.
 // Change this path if you switch to a different vault for testing.
-const vaultPluginDir = String.raw`C:\Users\X!-Carbon\Documents\Obsidian Vault\.obsidian\plugins\vault-copilot`;
+// Output directory. Override with the VAULT_PLUGIN_DIR environment variable,
+// e.g.  set VAULT_PLUGIN_DIR=C:\path\to\vault\.obsidian\plugins\vault-copilot
+// Defaults to the project root so `main.js` always lands somewhere predictable.
+const vaultPluginDir = process.env.VAULT_PLUGIN_DIR || path.resolve(".");
 
 const context = await esbuild.context({
 	banner: {

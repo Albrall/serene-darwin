@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, setIcon, TFile, SuggestModal, App } from 'obsidian';
+import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, setIcon, TFile, TFolder, TAbstractFile, SuggestModal, App } from 'obsidian';
 import type VaultCopilot from '../main';
 import { LLMProvider, ChatMessage } from './LLMProvider';
 import { PDFHandler, AttachmentData } from './PDFHandler';
@@ -36,6 +36,44 @@ class NoteSuggestModal extends SuggestModal<TFile> {
     }
 }
 
+// ── Folder picker modal ───────────────────────────────────────────────────────
+
+class FolderSuggestModal extends SuggestModal<TFolder> {
+    private onChoose: (folder: TFolder | null) => void;
+
+    constructor(app: App, onChoose: (folder: TFolder | null) => void) {
+        super(app);
+        this.onChoose = onChoose;
+        this.setPlaceholder('Choose a folder to use as context…');
+    }
+
+    getSuggestions(query: string): TFolder[] {
+        const lower = query.toLowerCase();
+        const folders: TFolder[] = [];
+        
+        const processAbstractFile = (file: TAbstractFile) => {
+            if (file instanceof TFolder) {
+                if (file.path === '/' || file.path.toLowerCase().includes(lower)) {
+                    folders.push(file);
+                }
+                file.children.forEach(processAbstractFile);
+            }
+        };
+        processAbstractFile(this.app.vault.getRoot());
+        
+        return folders.sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    renderSuggestion(folder: TFolder, el: HTMLElement) {
+        el.createEl('div', { text: folder.path === '/' ? 'Vault Root' : folder.name });
+        el.createEl('small', { text: folder.path, cls: 'vc-suggest-path' });
+    }
+
+    onChooseSuggestion(folder: TFolder) {
+        this.onChoose(folder);
+    }
+}
+
 // ── ChatPanel ─────────────────────────────────────────────────────────────────
 
 export class ChatPanel extends ItemView {
@@ -45,11 +83,11 @@ export class ChatPanel extends ItemView {
 
     private activeModel: string;
     /**
-     * The note currently pinned as context.
+     * The file or folder currently pinned as context.
      * null  = auto (active note).
-     * TFile = user has pinned a specific note.
+     * TAbstractFile = user has pinned a specific note or folder.
      */
-    private pinnedContextFile: TFile | null = null;
+    private pinnedContext: TAbstractFile | null = null;
     private llmProvider: LLMProvider;
 
     // DOM refs
@@ -134,7 +172,7 @@ export class ChatPanel extends ItemView {
 
         this.registerEvent(
             this.app.workspace.on('active-leaf-change', () => {
-                if (!this.pinnedContextFile) this.updateContextChipLabel();
+                if (!this.pinnedContext) this.updateContextChipLabel();
             })
         );
 
@@ -201,7 +239,7 @@ export class ChatPanel extends ItemView {
 
         if (activeFile) {
             addItem(`Use active note: ${activeFile.basename}`, 'file-text', () => {
-                this.pinnedContextFile = null;
+                this.pinnedContext = null;
                 this.updateContextChipLabel();
             });
         }
@@ -209,14 +247,23 @@ export class ChatPanel extends ItemView {
         addItem('Pick any note…', 'search', () => {
             new NoteSuggestModal(this.app, (file) => {
                 if (file) {
-                    this.pinnedContextFile = file;
+                    this.pinnedContext = file;
+                    this.updateContextChipLabel();
+                }
+            }).open();
+        });
+
+        addItem('Pick any folder…', 'folder', () => {
+            new FolderSuggestModal(this.app, (folder) => {
+                if (folder) {
+                    this.pinnedContext = folder;
                     this.updateContextChipLabel();
                 }
             }).open();
         });
 
         addItem('No context', 'x-circle', () => {
-            this.pinnedContextFile = null;
+            this.pinnedContext = null;
             this.contextChipLabel.textContent = 'No context';
         });
 
@@ -235,8 +282,8 @@ export class ChatPanel extends ItemView {
     }
 
     private updateContextChipLabel() {
-        if (this.pinnedContextFile) {
-            this.contextChipLabel.textContent = this.pinnedContextFile.basename;
+        if (this.pinnedContext) {
+            this.contextChipLabel.textContent = this.pinnedContext.name || 'Vault Root';
             return;
         }
         const active = this.app.workspace.getActiveFile();
@@ -517,14 +564,45 @@ export class ChatPanel extends ItemView {
 
             const toSend = [...this.messages.slice(0, -1)];
 
-            // Inject context note — pinned takes priority, otherwise active note
-            const contextFile = this.pinnedContextFile ?? this.plugin.app.workspace.getActiveFile();
-            if (contextFile) {
-                const content = await this.plugin.app.vault.read(contextFile);
-                toSend.unshift({
-                    role: 'system',
-                    content: PromptLibrary.getInteractiveEditPrompt(contextFile.name, content)
-                });
+            // Inject context — pinned takes priority, otherwise active note
+            const contextEntity = this.pinnedContext ?? this.plugin.app.workspace.getActiveFile();
+            if (contextEntity) {
+                if (contextEntity instanceof TFolder) {
+                    let combinedContent = '';
+                    let totalChars = 0;
+                    const charLimit = 150000; // rough limit to prevent massive payload
+
+                    const processFolder = async (folder: TFolder) => {
+                        for (const child of folder.children) {
+                            if (totalChars > charLimit) break;
+                            if (child instanceof TFile && child.extension === 'md') {
+                                const content = await this.plugin.app.vault.read(child);
+                                const snippet = `\n\n--- File: ${child.path} ---\n${content}`;
+                                combinedContent += snippet;
+                                totalChars += snippet.length;
+                            } else if (child instanceof TFolder) {
+                                await processFolder(child);
+                            }
+                        }
+                    };
+
+                    await processFolder(contextEntity);
+                    
+                    if (totalChars > charLimit) {
+                        combinedContent += `\n\n[TRUNCATED: Folder context exceeded character limit]`;
+                    }
+
+                    toSend.unshift({
+                        role: 'system',
+                        content: `You have access to the following folder context (${contextEntity.path}):\n${combinedContent}`
+                    });
+                } else if (contextEntity instanceof TFile && contextEntity.extension === 'md') {
+                    const content = await this.plugin.app.vault.read(contextEntity);
+                    toSend.unshift({
+                        role: 'system',
+                        content: PromptLibrary.getInteractiveEditPrompt(contextEntity.name, content)
+                    });
+                }
             }
 
             const omniContext = await this.getOmnisearchContext(text);
@@ -542,7 +620,12 @@ export class ChatPanel extends ItemView {
                 });
             }
 
-            const response = await this.llmProvider.generateResponse(toSend);
+            let streamedResponse = '';
+            const response = await this.llmProvider.generateResponse(toSend, (chunk) => {
+                streamedResponse += chunk;
+                this.messages[this.messages.length - 1].content = streamedResponse;
+                this.renderMessages();
+            });
             this.messages.pop();
             this.messages.push({ role: 'assistant', content: response });
         } catch (error) {
