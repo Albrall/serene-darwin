@@ -88,6 +88,15 @@ export class ChatPanel extends ItemView {
 
         const headerRight = header.createDiv({ cls: 'vc-header-right' });
 
+        // Model selector — in header so it's always visible
+        const modelBtn = headerRight.createEl('button', { cls: 'vc-model-btn' });
+        this.modelBtnLabel = modelBtn.createSpan({ cls: 'vc-model-label' });
+        this.modelBtnLabel.textContent = this.getModelLabel(this.activeModel);
+        const modelChevron = modelBtn.createSpan({ cls: 'vc-chip-chevron' });
+        setIcon(modelChevron, 'chevron-down');
+        modelBtn.title = 'Switch model';
+        modelBtn.addEventListener('click', (e) => this.openModelDropdown(modelBtn, e));
+
         const newChatBtn = headerRight.createEl('button', { cls: 'vc-icon-btn' });
         newChatBtn.title = 'New chat';
         setIcon(newChatBtn, 'square-pen');
@@ -129,17 +138,8 @@ export class ChatPanel extends ItemView {
             })
         );
 
-        // Toolbar right
+        // Toolbar right — attach + history only (model is in the header)
         const toolbarRight = toolbar.createDiv({ cls: 'vc-toolbar-right' });
-
-        // Model dropdown
-        const modelBtn = toolbarRight.createEl('button', { cls: 'vc-model-btn' });
-        this.modelBtnLabel = modelBtn.createSpan({ cls: 'vc-model-label' });
-        this.modelBtnLabel.textContent = this.getModelLabel(this.activeModel);
-        const modelChevron = modelBtn.createSpan({ cls: 'vc-chip-chevron' });
-        setIcon(modelChevron, 'chevron-down');
-        modelBtn.title = 'Switch model';
-        modelBtn.addEventListener('click', (e) => this.openModelDropdown(modelBtn, e));
 
         const attachToolBtn = toolbarRight.createEl('button', { cls: 'vc-icon-btn' });
         attachToolBtn.title = 'Attach file';
@@ -380,9 +380,11 @@ export class ChatPanel extends ItemView {
         const bubble = col.createDiv({ cls: `vc-bubble vc-bubble-${isUser ? 'user' : 'ai'}` });
 
         if (isLoading) {
-            // Spinner (reference-style — rotating arc, not bouncing dots)
-            const spinner = bubble.createDiv({ cls: 'vc-spinner' });
-            spinner.createDiv({ cls: 'vc-spinner-arc' });
+            // Three-dot typing indicator — animated in CSS, no JS needed
+            const typing = bubble.createDiv({ cls: 'vc-typing-indicator' });
+            typing.createDiv({ cls: 'vc-dot vc-dot-1' });
+            typing.createDiv({ cls: 'vc-dot vc-dot-2' });
+            typing.createDiv({ cls: 'vc-dot vc-dot-3' });
         } else if (isUser) {
             bubble.textContent = msg.content;
         } else {
